@@ -1,7 +1,8 @@
 #include <Servo.h>
 #include <FS.h>
+#include "FunctionalButton.h"
 
-//Mode determines the behavior of the hand. 
+//Mode determines the behavior of the hand.
 enum Mode
 {
   Off, Live, Playback
@@ -27,7 +28,7 @@ Servo pinkyServo;
 
 uint8_t thumbMax = 125;
 uint8_t indexMax = 150;
-uint8_t middleMax = 165   ;
+uint8_t middleMax = 165;
 uint8_t ringMax = 165;
 uint8_t pinkyMax = 180;
 
@@ -54,6 +55,12 @@ int fileIndex = 0;
 int maxNumFiles = 5;
 int fileOffset;
 
+FunctionalButton fileButton(14);
+FunctionalButton playButton(12);
+bool playActive = false;
+
+int PIR = 13;
+
 //Initialize Servos, SPIFFS, Serial.
 void setup()
 {
@@ -66,6 +73,7 @@ void setup()
   pinkyServo.attach(4);
   Serial.begin(9600); // opens serial port, sets data rate to 9600 bps
   fileIndex = GetFileIndex();
+  pinMode(PIR, INPUT);
 }
 
 void loop()
@@ -73,11 +81,7 @@ void loop()
   if (mode == Off)
   {
     //Open Hand When Off
-    SetPosition(Thumb, 0);
-    SetPosition(Index, 0);
-    SetPosition(Middle, 0);
-    SetPosition(Ring, 0);
-    SetPosition(Pinky, 0);
+    OpenHand();
   }
   else if (mode == Playback)
   {
@@ -91,6 +95,15 @@ void loop()
   //showNewData(); //Uncomment to print all received data.
   newData = false;
   ProcessNewData();
+}
+
+void OpenHand()
+{
+    SetPosition(Thumb, 0);
+    SetPosition(Index, 0);
+    SetPosition(Middle, 0);
+    SetPosition(Ring, 0);
+    SetPosition(Pinky, 0);
 }
 
 //Set the servos to their saved Positions
@@ -120,7 +133,7 @@ void ProcessNewData()
   }
 }
 
-//Process Data which may affect any mode. 
+//Process Data which may affect any mode.
 boolean ProcessGeneralData()
 {
   //Special Messages:
@@ -152,7 +165,7 @@ boolean ProcessGeneralData()
       }
       else if (mode == Live)
       {
-        if (receivedChars[dataIndex] == (char)251) //We got a message to Start recording 
+        if (receivedChars[dataIndex] == (char)251) //We got a message to Start recording
         {
           OverwriteFile(GetFilename(), "");
           recording = true;
@@ -165,7 +178,7 @@ boolean ProcessGeneralData()
         }
       }
       break;
-    case ModeChange: //We got a Mode Change message, so the next message will specify the new Mode. 
+    case ModeChange: //We got a Mode Change message, so the next message will specify the new Mode.
       if (receivedChars[dataIndex] == (char)1)
       {
         SetMode(Off);
@@ -182,16 +195,16 @@ boolean ProcessGeneralData()
         fileOffset = 0;
         consumedMessage = true;
       }
-      messageType = Unspecified; //Reset the current message type. 
+      messageType = Unspecified; //Reset the current message type.
       break;
-    case FingerData: //We got a Finger Data message, so until we get another message signifying the Finger Data is finished, we will process all messages as Finger Data. 
+    case FingerData: //We got a Finger Data message, so until we get another message signifying the Finger Data is finished, we will process all messages as Finger Data.
       if (receivedChars[dataIndex] == (char)254)
       {
         messageType = Unspecified;
         consumedMessage = true;
       }
       break;
-    case SetFile: //We got a Set File message so the next message will tell us what File to use. 
+    case SetFile: //We got a Set File message so the next message will tell us what File to use.
       SetFileIndex((int)receivedChars[dataIndex] - 1);
       messageType = Unspecified;
       consumedMessage = true;
@@ -200,14 +213,14 @@ boolean ProcessGeneralData()
   return consumedMessage;
 }
 
-//Process Data for live mode - specifically, FingerData messages. 
+//Process Data for live mode - specifically, FingerData messages.
 void ProcessLiveData()
 {
   if (messageType != FingerData)
     return;
   if (currentFinger == None)
   {
-    //If no finger is specified, the next message will tell us what it is. 
+    //If no finger is specified, the next message will tell us what it is.
     if (receivedChars[dataIndex] == 'T')
       currentFinger = Thumb;
     else if (receivedChars[dataIndex] == 'I')
@@ -221,7 +234,7 @@ void ProcessLiveData()
   }
   else
   {
-    //If a finger is specified, the next message will tell us the amount it is closed. 
+    //If a finger is specified, the next message will tell us the amount it is closed.
     SetPosition(currentFinger, (uint8_t)receivedChars[dataIndex] - 1);
     currentFinger = None;
   }
@@ -233,7 +246,7 @@ int GetFileIndex()
   return ReadFile("/fileIndex.txt").toInt();
 }
 
-//Set the file index and write it to a file. 
+//Set the file index and write it to a file.
 void SetFileIndex(int ind)
 {
   fileIndex = ind;
@@ -252,7 +265,7 @@ void SetMode(Mode newMode)
   Serial.println(newMode);
 }
 
-//Figure out and set the position of a specified finger to a specified percentage closed. Also, record it if Recording is active. 
+//Figure out and set the position of a specified finger to a specified percentage closed. Also, record it if Recording is active.
 void SetPosition(Finger type, uint8_t amountClosed)
 {
   switch (type)
@@ -297,7 +310,7 @@ void RecordDataStart()
   AppendFile(GetFilename(), contents);
 }
 
-//Record the position of a finger to a file. 
+//Record the position of a finger to a file.
 void RecordPosition(Finger type, uint8_t fingerPosition)
 {
   if (!recording)
@@ -310,17 +323,29 @@ void RecordPosition(Finger type, uint8_t fingerPosition)
   AppendFile(GetFilename(), contents);
 }
 
-//Handle playback by reading a file and using its contents to set finger positions. 
+//Handle playback by reading a file and using its contents to set finger positions.
 void PlaybackLoop()
 {
-  //First, we read the full file and check its length so we know how many bytes we can possibly read. 
+  if (fileButton.Down())
+    SetFileIndex((fileIndex + 1) % maxNumFiles); // Go to next File if button pressed
+
+  if (playButton.Down() || digitalRead(PIR) == HIGH)
+    playActive = true;
+
+  if (!playActive)
+  {
+    OpenHand();
+    return;
+  }
+
+  //First, we read the full file and check its length so we know how many bytes we can possibly read.
   String fullString = ReadFile(GetFilename());
   int totalLength = fullString.length();
   //Next we open the file to read the current line
   File f = SPIFFS.open(GetFilename(), "r");
   if (!f)
     return;
-  f.seek(fileOffset, SeekSet);  //Navigate to the saved position in the file: 
+  f.seek(fileOffset, SeekSet);  //Navigate to the saved position in the file:
   String line = f.readStringUntil('\n'); //Read the next line
   fileOffset = (fileOffset + (line.length() + 1)) % totalLength; //Adjust the offset, wrapping back to the beginning of the file if needed
   while (!line.equals("-") && line.length() > 0) //Loop through all saved data until we either get an empty line or a '-'
@@ -350,13 +375,16 @@ void PlaybackLoop()
         break;
     }
     line = f.readStringUntil('\n');
-        fileOffset = (fileOffset + (line.length() + 1)) % totalLength; //Adjust the offset, wrapping back to the beginning of the file if needed
+    fileOffset = (fileOffset + (line.length() + 1)) % totalLength; //Adjust the offset, wrapping back to the beginning of the file if needed
+    if(fileOffset == 0)
+      playActive = false;
   }
   f.close();
-  delay(50); //Delay to properly set the speed of the recorded motion. Data is received over serial at 50ms, so each "-" signifies a 50ms pause. 
+  delay(50); //Delay to properly set the speed of the recorded motion. Data is received over serial at 50ms, so each "-" signifies a 50ms pause.
 }
 
-//Calculate the servo angle based on how closed it should be and what angle constitutes 100% closed. 
+
+//Calculate the servo angle based on how closed it should be and what angle constitutes 100% closed.
 int GetAngle(uint8_t amountClosed, uint8_t maxValue)
 {
   float percentClosed = ((float)amountClosed) / (float)128;
